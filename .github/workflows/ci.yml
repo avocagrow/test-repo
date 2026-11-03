@@ -1,0 +1,61 @@
+# Stand-in for device-agent's ci.yml: same triggers, same per-ref
+# cancel-in-progress group, and the lab section behind one global lock.
+name: CI
+
+on:
+  pull_request:
+  merge_group:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Build (sleep)
+        run: sleep "${{ vars.BUILD_SECONDS || '60' }}"
+
+  # PR checks don't use the lab in device-agent; they record a placeholder.
+  lab-placeholder:
+    if: ${{ github.event_name == 'pull_request' }}
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "Pull requests don't use the lab."
+
+  # A fixed group name, not one built from github.workflow: a called workflow
+  # sees its caller's workflow name, and the lock must be shared with weekly.yml.
+  lab:
+    if: ${{ github.event_name != 'pull_request' }}
+    needs: build
+    concurrency:
+      group: device-lab
+      queue: max
+    uses: ./.github/workflows/lab.yml
+    with:
+      caller: ci-${{ github.event_name }}
+
+  # The single required check for the ruleset and merge queue.
+  ci-result:
+    if: ${{ always() }}
+    needs: [build, lab-placeholder, lab]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Fail if any job failed or was cancelled
+        env:
+          NEEDS: ${{ toJSON(needs) }}
+        run: |
+          echo "$NEEDS"
+          if grep -qE '"result": "(failure|cancelled)"' <<< "$NEEDS"; then
+            exit 1
+          fi

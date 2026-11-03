@@ -1,0 +1,21 @@
+# Stand-in for device-agent's weekly-e2e.yml. It keeps its own workflow-level
+# group, like the real one, and waits for the same device-lab lock as CI.
+name: Weekly
+
+on:
+  schedule:
+    - cron: '0 6 * * 1'
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: false
+
+jobs:
+  lab:
+    concurrency:
+      group: device-lab
+      queue: max
+    uses: ./.github/workflows/lab.yml
+    with:
+      caller: weekly-${{ github.event_name }}

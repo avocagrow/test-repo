@@ -1,0 +1,89 @@
+# Stand-in for device-agent's e2e-tests.yml lab section:
+# upgrade (lab runners) -> backup (GitHub-hosted) -> rollback (lab runners).
+# Every step just sleeps. The callers hold the device-lab concurrency group
+# around this whole workflow; this file has no concurrency of its own.
+#
+# On self-hosted runners (LAB_RUNNER_GROUP set) each lab runner keeps a marker
+# file naming the run that "installed" on it. upgrade fails if another run's
+# marker is present, and rollback fails if the marker changed underneath it.
+# That is the 1648 failure mode, detected in-band. On GitHub-hosted runners
+# there is no shared machine state, so use scripts/check-overlap.sh instead.
+name: Lab
+
+on:
+  workflow_call:
+    inputs:
+      caller:
+        description: Which workflow and event called the lab section, for the logs.
+        type: string
+        required: true
+
+defaults:
+  run:
+    shell: bash
+
+env:
+  UPGRADE_SECONDS: ${{ vars.LAB_UPGRADE_SECONDS || '120' }}
+  BACKUP_SECONDS: ${{ vars.LAB_BACKUP_SECONDS || '180' }}
+  ROLLBACK_SECONDS: ${{ vars.LAB_ROLLBACK_SECONDS || '60' }}
+  RUN_TAG: ${{ github.run_id }}-${{ github.run_attempt }}
+
+jobs:
+  upgrade:
+    name: upgrade-${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: ${{ fromJSON(vars.LAB_RUNNERS || '["lab-a","lab-b"]') }}
+    runs-on: ${{ vars.LAB_RUNNER_GROUP && fromJSON(format('{{"group":"{0}","labels":["{1}"]}}', vars.LAB_RUNNER_GROUP, matrix.runner)) || 'ubuntu-latest' }}
+    steps:
+      - name: Install agent (sleep)
+        run: |
+          echo "LAB upgrade start runner=${{ matrix.runner }} run=$RUN_TAG caller=${{ inputs.caller }} at=$(date -u +%FT%TZ)"
+          if [[ -n "${{ vars.LAB_RUNNER_GROUP }}" ]]; then
+            marker="$HOME/lab-marker-${{ matrix.runner }}"
+            if [[ -f "$marker" && "$(cat "$marker")" != "$RUN_TAG" ]]; then
+              echo "::error::OVERLAP: runner ${{ matrix.runner }} still holds run $(cat "$marker")'s install"
+              exit 1
+            fi
+            echo "$RUN_TAG" > "$marker"
+          fi
+          sleep "$UPGRADE_SECONDS"
+          echo "LAB upgrade end runner=${{ matrix.runner }} run=$RUN_TAG at=$(date -u +%FT%TZ)"
+
+  backup:
+    name: backup
+    needs: upgrade
+    runs-on: ubuntu-latest
+    steps:
+      - name: Run backups against the lab (sleep)
+        run: |
+          echo "LAB backup start run=$RUN_TAG at=$(date -u +%FT%TZ)"
+          sleep "$BACKUP_SECONDS"
+          echo "LAB backup end run=$RUN_TAG at=$(date -u +%FT%TZ)"
+
+  # Runs on failure and on cancel. device-agent's rollback has !cancelled(),
+  # which is what left the Studio 5000 machine without an agent on 2026-11-02.
+  rollback:
+    name: rollback-${{ matrix.runner }}
+    needs: [upgrade, backup]
+    if: ${{ always() }}
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: ${{ fromJSON(vars.LAB_RUNNERS || '["lab-a","lab-b"]') }}
+    runs-on: ${{ vars.LAB_RUNNER_GROUP && fromJSON(format('{{"group":"{0}","labels":["{1}"]}}', vars.LAB_RUNNER_GROUP, matrix.runner)) || 'ubuntu-latest' }}
+    steps:
+      - name: Restore stable agent (sleep)
+        run: |
+          echo "LAB rollback start runner=${{ matrix.runner }} run=$RUN_TAG at=$(date -u +%FT%TZ)"
+          sleep "$ROLLBACK_SECONDS"
+          if [[ -n "${{ vars.LAB_RUNNER_GROUP }}" ]]; then
+            marker="$HOME/lab-marker-${{ matrix.runner }}"
+            if [[ -f "$marker" && "$(cat "$marker")" != "$RUN_TAG" ]]; then
+              echo "::error::OVERLAP: run $(cat "$marker") installed on ${{ matrix.runner }} during this run"
+              exit 1
+            fi
+            rm -f "$marker"
+          fi
+          echo "LAB rollback end runner=${{ matrix.runner }} run=$RUN_TAG at=$(date -u +%FT%TZ)"
